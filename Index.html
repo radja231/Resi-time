@@ -1,0 +1,575 @@
+app.py — Pomodoro Study Site (Flask + SQLite)
+
+
+--------------------------------------------
+
+
+Features
+
+
+- Auth: sign up / log in / log out (per-user data)
+
+
+- Pomodoro modes: 25/5 or 50/10
+
+
+- Daily stats: sums focused minutes per calendar day
+
+
+- Gray background theme
+
+
+- Login page shows "Made by Miya"
+
+
+
+
+
+How to run (Windows/Mac/Linux):
+
+
+1) Install Python 3.9+.
+
+
+2) Create a virtual env (optional but recommended):
+
+
+python -m venv .venv && source .venv/bin/activate   (Linux/Mac)
+
+
+py -m venv .venv && .venv\Scripts\activate        (Windows)
+
+
+3) Install deps: pip install flask werkzeug
+
+
+4) Run: python app.py
+
+
+5) Open http://127.0.0.1:5000 in your browser.
+
+
+
+
+
+If you want to reset data, delete the file pomodoro.db and restart the app.
+
+
+from future import annotations
+import sqlite3
+from datetime import datetime, date
+from pathlib import Path
+from typing import Optional
+
+
+from flask import (
+Flask, g, redirect, render_template_string, request, session, url_for, jsonify, abort
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+
+
+APP_SECRET = "change-me-please-very-secret"  # change this in production
+DB_PATH = Path("pomodoro.db")
+
+
+app = Flask(name)
+app.config.update(SECRET_KEY=APP_SECRET)
+
+
+-------------------- DB helpers --------------------
+
+
+def get_db():
+if "db" not in g:
+g.db = sqlite3.connect(DB_PATH)
+g.db.row_factory = sqlite3.Row
+return g.db
+
+
+@app.teardown_appcontext
+def close_db(exception: Optional[BaseException]):
+db = g.pop("db", None)
+if db is not None:
+db.close()
+
+
+def init_db():
+db = get_db()
+db.executescript(
+"""
+CREATE TABLE IF NOT EXISTS users (
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+email TEXT UNIQUE NOT NULL,
+name TEXT,
+password_hash TEXT NOT NULL,
+created_at TEXT NOT NULL
+);
+
+
+    CREATE TABLE IF NOT EXISTS sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        day TEXT NOT NULL,           -- stored as ISO date string YYYY-MM-DD
+        minutes INTEGER NOT NULL,    -- focused minutes only
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+    """
+)
+db.commit()
+
+
+
+Ensure DB exists on startup
+
+
+with app.app_context():
+init_db()
+
+
+-------------------- Utilities --------------------
+
+
+def current_user():
+uid = session.get("user_id")
+if not uid:
+return None
+db = get_db()
+return db.execute("SELECT * FROM users WHERE id = ?", (uid,)).fetchone()
+
+
+def login_required():
+if not current_user():
+return redirect(url_for("login"))
+return None
+
+
+-------------------- HTML Templates --------------------
+
+
+BASE_CSS = """
+:root {
+--bg: #ededed; /* gray background */
+--card: #ffffff;
+--text: #222;
+--muted: #666;
+--primary: #2d6cdf;
+--success: #22a06b;
+--danger: #e5534b;
+--radius: 16px;
+}
+
+
+
+
+{ box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+background: var(--bg); color: var(--text); display: flex; align-items: center; justify-content: center;
+}
+.container { width: min(900px, 92vw); margin: 40px auto; }
+.card { background: var(--card); border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,.08); padding: 28px; }
+.h {
+display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px;
+}
+h1, h2, h3 { margin: 0 0 10px; }
+label { font-weight: 600; }
+input, select, button { font: inherit; }
+.input, .btn, select { border-radius: 12px; border: 1px solid #ddd; padding: 10px 12px; }
+.btn { background: var(--primary); color: #fff; border: none; cursor: pointer; }
+.btn.alt { background: #444; }
+.btn.ghost { background: transparent; color: var(--primary); border: 1px solid var(--primary);}
+.btn.danger { background: var(--danger);}
+.row { display: flex; gap: 12px; flex-wrap: wrap; }
+.help { color: var(--muted); font-size: 0.9rem; }
+.center { text-align: center; }
+.badge { display:inline-block; background:#f1f3f5; border:1px solid #e5e7eb; padding:6px 10px; border-radius:999px; font-size:.85rem; }
+.stat { display:flex; gap:10px; align-items:center; }
+.progress {
+width: 100%; height: 16px; background: #f1f1f1; border-radius: 999px; overflow: hidden; border:1px solid #e5e7eb;
+}
+.progress > div { height: 100%; background: var(--success); width: 0%; transition: width .25s linear; }
+.timer {
+font-size: clamp(40px, 8vw, 80px); font-weight: 800; letter-spacing: 1px; margin: 14px 0 6px; text-align:center;
+}
+.mode-toggle { display:flex; gap: 8px; justify-content:center; margin: 10px 0 18px; }
+.mode-toggle button { background:#f8fafc; color:#111; border:1px solid #e5e7eb; }
+.mode-toggle button.active { background: var(--primary); color:#fff; border-color: var(--primary); }
+.footer { margin-top: 16px; color: var(--muted); font-size: .9rem; }
+.nav { display:flex; gap:8px; align-items:center; }
+.link { color: var(--primary); text-decoration: none; }
+
+
+
+
+/* Responsive layout */
+@media (max-width: 640px) {
+.row { flex-direction: column; }
+}
+"""
+
+
+LOGIN_TPL = """
+
+
+
+
+  
+  
+  
+  
+
+
+  
+
+    
+
+      
+مرحبًا 👋
+Made by Miya
+
+      
+سجّل الدخول أو أنشئ حسابًا لحفظ إحصائياتك اليومية.
+
+      
+        
+
+          
+
+            البريد الإلكتروني
+            
+          
+
+          
+
+            كلمة المرور
+            
+          
+
+        
+
+        
+
+          تسجيل الدخول
+          إنشاء حساب جديد
+        
+
+      
+      {% if error %}
+        
+{{ error }}
+
+      {% endif %}
+      
+خلفية رمادية — واجهة بسيطة وخفيفة.
+
+    
+
+  
+
+
+
+"""
+
+SIGNUP_TPL = """
+
+
+
+
+  
+  
+  
+  
+
+
+  
+
+    
+
+      
+حساب جديد
+Made by Miya
+
+      
+        
+
+          
+
+            الاسم
+            
+          
+
+          
+
+            البريد الإلكتروني
+            
+          
+
+        
+
+        
+
+          
+
+            كلمة المرور
+            
+          
+
+          
+
+            تأكيد كلمة المرور
+            
+          
+
+        
+
+        
+
+          إنشاء الحساب
+          لديك حساب؟ تسجيل الدخول
+        
+
+      
+      {% if error %}
+        
+{{ error }}
+
+      {% endif %}
+    
+
+  
+
+
+
+"""
+
+DASHBOARD_TPL = """
+
+
+
+
+  
+  
+  
+  
+
+
+  
+
+    
+
+      
+
+        
+مرحبا {{ user['name'] or user['email'] }} 👋
+
+        
+
+          إحصائياتي
+          
+            خروج
+          
+        
+
+      
+
+
+  <div class="mode-toggle">
+    <button id="mode25" class="btn active" onclick="selectMode(25,5)">25 د دراسة / 5 د راحة</button>
+    <button id="mode50" class="btn" onclick="selectMode(50,10)">50 د دراسة / 10 د راحة</button>
+  </div>
+
+  <div class="card" style="padding:18px;">
+    <div class="center"><div class="badge" id="phaseLabel">الآن: دراسة</div></div>
+    <div class="timer" id="timer">25:00</div>
+    <div class="progress"><div id="bar"></div></div>
+    <div class="row" style="justify-content:center; margin-top:12px;">
+      <button class="btn" id="startBtn" onclick="startTimer()">بدء</button>
+      <button class="btn alt" onclick="pauseTimer()">إيقاف مؤقت</button>
+      <button class="btn ghost" onclick="resetTimer()">إعادة</button>
+    </div>
+    <p class="center help" id="hint">عند انتهاء فترة الدراسة، تُسجّل دقائقك تلقائيًا في إحصائيات اليوم.</p>
+  </div>
+
+  <div style="margin-top:12px; display:flex; gap:10px; justify-content:space-between; flex-wrap:wrap;">
+    <div class="stat"><strong>اليوم:</strong> <span id="todaySum" class="badge">-- دقيقة</span></div>
+    <div class="stat"><strong>الوضع:</strong> <span id="modeText" class="badge">25/5</span></div>
+  </div>
+</div>
+
+
+  
+
+
+
+
+"""
+
+STATS_TPL = """
+
+
+
+
+  
+  
+  
+  
+
+
+  
+
+    
+
+      
+
+        
+إحصائياتي اليومية
+
+        
+
+          العودة للمؤقت
+          
+            خروج
+          
+        
+
+      
+
+
+  {% if rows %}
+    <div class="card" style="padding:18px;">
+      <div class="row" style="justify-content:space-between; font-weight:600;">
+        <div>اليوم</div>
+        <div>الدقائق المركّزة</div>
+      </div>
+      {% for r in rows %}
+        <div class="row" style="justify-content:space-between; border-bottom:1px solid #eee; padding:8px 0;">
+          <div>{{ r['day'] }}</div>
+          <div>{{ r['total'] }} دقيقة</div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="help">لا توجد بيانات بعد. ارجع للمؤقت وأكمل جلسة دراسة.</p>
+  {% endif %}
+
+  <div class="footer">يتم جمع الدقائق المركّزة فقط (بدون فترات الراحة).</div>
+</div>
+
+
+  
+
+
+
+"""
+
+-------------------- Routes --------------------
+
+
+@app.route("/")
+def index():
+if current_user():
+return redirect(url_for("dashboard"))
+return redirect(url_for("login"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+if request.method == "POST":
+email = request.form.get("email", "").strip().lower()
+password = request.form.get("password", "")
+db = get_db()
+user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+if user and check_password_hash(user["password_hash"], password):
+session["user_id"] = user["id"]
+return redirect(url_for("dashboard"))
+return render_template_string(LOGIN_TPL, css=BASE_CSS, error="معلومات الدخول غير صحيحة")
+return render_template_string(LOGIN_TPL, css=BASE_CSS, error=None)
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+if request.method == "POST":
+name = request.form.get("name", "").strip()
+email = request.form.get("email", "").strip().lower()
+pw1 = request.form.get("password", "")
+pw2 = request.form.get("password2", "")
+if pw1 != pw2:
+return render_template_string(SIGNUP_TPL, css=BASE_CSS, error="كلمتا المرور غير متطابقتين")
+if len(pw1) < 6:
+return render_template_string(SIGNUP_TPL, css=BASE_CSS, error="كلمة المرور قصيرة جدًا (6 أحرف على الأقل)")
+db = get_db()
+try:
+db.execute(
+"INSERT INTO users (email, name, password_hash, created_at) VALUES (?, ?, ?, ?)",
+(email, name, generate_password_hash(pw1), datetime.utcnow().isoformat()),
+)
+db.commit()
+except sqlite3.IntegrityError:
+return render_template_string(SIGNUP_TPL, css=BASE_CSS, error="هذا البريد مسجّل مسبقًا")
+# Auto-login
+user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+session["user_id"] = user["id"]
+return redirect(url_for("dashboard"))
+return render_template_string(SIGNUP_TPL, css=BASE_CSS, error=None)
+
+
+@app.post("/logout")
+def logout():
+session.clear()
+return redirect(url_for("login"))
+
+
+@app.route("/dashboard")
+def dashboard():
+if not current_user():
+return redirect(url_for("login"))
+return render_template_string(DASHBOARD_TPL, css=BASE_CSS, user=current_user())
+
+
+@app.get("/stats")
+def stats():
+if not current_user():
+return redirect(url_for("login"))
+db = get_db()
+rows = db.execute(
+"SELECT day, SUM(minutes) as total FROM sessions WHERE user_id = ? GROUP BY day ORDER BY day DESC LIMIT 30",
+(current_user()["id"],)
+).fetchall()
+return render_template_string(STATS_TPL, css=BASE_CSS, rows=rows)
+
+
+@app.post("/api/log")
+def api_log():
+if not current_user():
+return abort(401)
+data = request.get_json(force=True)
+minutes = int(data.get("minutes", 0))
+if minutes <= 0 or minutes > 300:
+return jsonify({"ok": False, "error": "invalid minutes"}), 400
+db = get_db()
+today = date.today().isoformat()
+db.execute(
+"INSERT INTO sessions (user_id, day, minutes, created_at) VALUES (?, ?, ?, ?)",
+(current_user()["id"], today, minutes, datetime.utcnow().isoformat())
+)
+db.commit()
+return jsonify({"ok": True})
+
+
+@app.get("/api/today")
+def api_today():
+if not current_user():
+return abort(401)
+db = get_db()
+today = date.today().isoformat()
+row = db.execute(
+"SELECT COALESCE(SUM(minutes),0) AS total FROM sessions WHERE user_id = ? AND day = ?",
+(current_user()["id"], today)
+).fetchone()
+return jsonify({"total_minutes": int(row["total"])})
+
+
+if name == "main":
+app.run(debug=True)
